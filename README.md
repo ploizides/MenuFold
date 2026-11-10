@@ -2,10 +2,14 @@
 
 A tiny menu bar app for macOS 27 that folds away the menu bar icons you don't need. Click the chevron to hide them, and click again to bring them back.
 
-```
-unfolded:   ↕  │  ›  ☁  ⌘  Wi-Fi  🔋
-folded:            ‹  ☁  ⌘  Wi-Fi  🔋
-```
+
+#### Unfolded:
+<img width="516" height="31" alt="image" src="https://github.com/user-attachments/assets/3f29548a-1096-4bf1-9ef8-eb052d17dd72" />
+
+#### Folded:
+<img width="487" height="37" alt="image" src="https://github.com/user-attachments/assets/5edf7876-a035-496c-9589-ff7ea23efd1a" />
+
+
 
 ## Why another one?
 
