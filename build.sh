@@ -10,6 +10,8 @@ APP="build/MenuFold.app"
 rm -rf build
 mkdir -p "$APP/Contents/MacOS"
 cp Info.plist "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 for ARCH in arm64 x86_64; do
   swiftc -O -swift-version 5 -target "$ARCH-apple-macos14.0" Sources/*.swift -o "build/MenuFold-$ARCH"
