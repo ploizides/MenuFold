@@ -31,7 +31,11 @@ case "${1:-}" in
     ;;
   zip)
     ditto -c -k --keepParent "$APP" build/MenuFold.zip
-    shasum -a 256 build/MenuFold.zip
-    echo "Created build/MenuFold.zip"
+    VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+    SHA=$(shasum -a 256 build/MenuFold.zip | cut -d' ' -f1)
+    # Keep the Homebrew cask pointing at this exact zip.
+    sed -i '' -E "s/^  version \".*\"/  version \"$VERSION\"/; s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/menufold.rb
+    echo "Created build/MenuFold.zip (v$VERSION, sha256 $SHA)"
+    echo "Updated Casks/menufold.rb. Next: commit, push, then: gh release create v$VERSION build/MenuFold.zip"
     ;;
 esac

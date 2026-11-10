@@ -32,7 +32,16 @@ MenuFold stretches the divider only as far as the notch. The icons to its left t
      xattr -dr com.apple.quarantine /Applications/MenuFold.app
      ```
 
-### Option 2: Build it yourself
+### Option 2: Homebrew
+
+```bash
+brew tap ploizides/menufold https://github.com/ploizides/MenuFold
+brew install --cask ploizides/menufold/menufold
+```
+
+Homebrew clears the "could not verify" flag for you, so it opens straight away. Run `brew upgrade` to update to new versions, and `brew uninstall --cask menufold` to remove it.
+
+### Option 3: Build it yourself
 
 You need Apple's command line tools. Run `xcode-select --install` if you don't have them.
 
@@ -43,6 +52,14 @@ cd MenuFold
 ```
 
 The app is built on your own Mac, so macOS won't show a warning.
+
+## Releasing a new version (maintainers)
+
+Pushing to `main` does **not** update the download. The release zip is a snapshot. To ship changes:
+
+1. Bump `CFBundleShortVersionString` in `Info.plist` (e.g. `1.1`).
+2. `./build.sh zip`, which builds the zip and updates `Casks/menufold.rb`.
+3. Commit and push, then `gh release create v1.1 build/MenuFold.zip`.
 
 ## Use
 
