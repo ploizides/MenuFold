@@ -125,7 +125,6 @@ final class Controller: NSObject, ObservableObject, NSApplicationDelegate, NSWin
     private static let toggleName  = "MenuFold.Toggle"
     private static let dividerName = "MenuFold.Divider"
     private let log = Logger(subsystem: "com.ploizides.menufold", category: "fold")
-    private var foldGeneration = 0          // cancels stale measurements
     private var lastScreenID: CGDirectDisplayID?
     private var watchTimer: Timer?
 
@@ -133,27 +132,22 @@ final class Controller: NSObject, ObservableObject, NSApplicationDelegate, NSWin
     //
     // On macOS 27 the menu bar (MenuBarAgent) *hides an item that is absurdly wide* rather than
     // letting it push its neighbours away, so the classic "length = 10_000" trick only makes the
-    // divider vanish. Instead the divider must fill exactly the free space between the left limit
-    // of the status-item area and the toggle. Everything left of the divider then no longer fits
-    // and macOS hides it (its own overflow behaviour).
+    // divider vanish. Instead the divider is sized to fill exactly the space between the notch and
+    // the toggle. Icons left of the divider would have to sit under the notch, and macOS always
+    // hides those.
     //
-    // The free space ends at the notch on a notched display, and where the frontmost app's menus
-    // (File, Edit, View…) end on a display without one. One status item has one length on every
-    // display, so we size it for the display whose menu bar is active and recompute whenever that
-    // display or the frontmost app changes.
-    //
-    // How we find the right length:
-    //   1. Make a guess: remembered result for this display+app > notch > Accessibility (where the
-    //      app's menus end; optional permission).
-    //   2. Verify it: when an item fits, macOS moves its window to the new spot within ~0.1 s;
-    //      when it doesn't fit, macOS hides it and leaves the window where it was.
-    //   3. If the guess fails (or there is none), binary-search the widest length that still fits.
-    //      Each failing try briefly hides the divider, so icons flash visible for ~1 s.
+    // A display without a notch has no such hard wall. There macOS decides by itself which items
+    // to drop when they don't fit, and it drops MenuFold's divider rather than other apps' icons
+    // (measured on macOS 27.2), so folding can't work. On those displays folding is paused: the
+    // divider goes back to normal width and everything stays visible. It resumes by itself when
+    // the menu bar is back on a notched display.
 
     private static let buttonPadding: CGFloat = 16   // an item's window is `length + 16` wide
     private static let margin: CGFloat = 2           // too thin for any icon to squeeze in
     private static let minLength: CGFloat = 40
-    private var fitCache: [String: CGFloat] = [:]   // "displayID|bundleID" -> length that fit
+
+    /// True while the user wants the bar folded but the active display has no notch.
+    @Published private(set) var foldPaused = false
 
     private func displayID(_ s: NSScreen) -> CGDirectDisplayID? {
         (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
@@ -163,141 +157,26 @@ final class Controller: NSObject, ObservableObject, NSApplicationDelegate, NSWin
 
     private func recomputeFold(_ reason: String) {
         guard folded, let tw = toggle.button?.window, let screen = tw.screen ?? NSScreen.main else { return }
-        foldGeneration += 1
-        let gen = foldGeneration
-        let toggleX = tw.frame.minX   // the toggle doesn't move when the divider resizes
         lastScreenID = displayID(screen)
-        let app = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
-        let key = "\(lastScreenID ?? 0)|\(app)"
-        let lengthTo = { (limit: CGFloat) in max(toggleX - limit - Self.buttonPadding - Self.margin, Self.minLength) }
+        let toggleX = tw.frame.minX   // the toggle doesn't move when the divider resizes
 
-        var guess: CGFloat?
-        var how = "search"
-        if let cached = fitCache[key] {
-            guess = cached; how = "remembered"
-        } else if let notch = screen.auxiliaryTopRightArea, ProcessInfo.processInfo.environment["MENUFOLD_IGNORE_NOTCH"] == nil {
-            guess = lengthTo(notch.minX); how = "notch"
-        } else if let menuEnd = appMenuEnd(on: screen) {
-            guess = lengthTo(menuEnd); how = "accessibility"
-        }
-
-        let finish = { [weak self] (length: CGFloat, how: String) in
-            guard let self, self.folded, gen == self.foldGeneration else { return }
-            self.divider.length = length
-            self.fitCache[key] = length
-            self.log.notice("""
+        if let notch = screen.auxiliaryTopRightArea {
+            let length = max(toggleX - notch.minX - Self.buttonPadding - Self.margin, Self.minLength)
+            divider.length = length
+            foldPaused = false
+            log.notice("""
                 fold [\(reason, privacy: .public)] screen=\(screen.localizedName, privacy: .public) \
-                app=\(app, privacy: .public) toggleX=\(toggleX, privacy: .public) \
-                length=\(length, privacy: .public) via \(how, privacy: .public)
+                toggleX=\(toggleX, privacy: .public) length=\(length, privacy: .public)
                 """)
-        }
-        let search = { [weak self] (hi: CGFloat) in
-            self?.searchFit(lo: Self.minLength, hi: hi, toggleX: toggleX, gen: gen) { finish($0, how == "search" ? "search" : "\(how)+search") }
-        }
-
-        if let g = guess {
-            tryLength(g, toggleX: toggleX, gen: gen) { fits in fits ? finish(g, how) : search(g) }
         } else {
-            search(toggleX - screen.frame.minX - Self.buttonPadding)
+            divider.length = NSStatusItem.variableLength
+            foldPaused = true
+            log.notice("fold paused [\(reason, privacy: .public)] screen=\(screen.localizedName, privacy: .public) has no notch")
         }
+        refresh()
     }
 
-    /// An item that fits is laid out ending just left of the toggle, at the requested width.
-    private func dividerFits(_ length: CGFloat, toggleX: CGFloat) -> Bool {
-        guard let f = divider.button?.window?.frame else { return false }
-        return abs(f.width - (length + Self.buttonPadding)) < 1 && f.maxX > toggleX - 12 && f.maxX <= toggleX + 1
-    }
-
-    private func tryLength(_ length: CGFloat, toggleX: CGFloat, gen: Int, _ done: @escaping (Bool) -> Void) {
-        divider.length = length
-        let start = Date()
-        func poll() {
-            guard folded, gen == foldGeneration else { return }   // superseded: drop silently
-            let elapsed = Date().timeIntervalSince(start)
-            if dividerFits(length, toggleX: toggleX) {
-                log.debug("try \(length, privacy: .public) fits after \(elapsed, privacy: .public)s")
-                return done(true)
-            }
-            if elapsed > 0.5 {
-                let f = divider.button?.window?.frame ?? .zero
-                log.debug("try \(length, privacy: .public) hidden; frame \(f.minX, privacy: .public)..\(f.maxX, privacy: .public) w=\(f.width, privacy: .public)")
-                return done(false)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { poll() } }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { poll() } }
-    }
-
-    /// Binary search for the widest divider that still fits. `lo` is assumed to fit, `hi` not.
-    private func searchFit(lo: CGFloat, hi: CGFloat, toggleX: CGFloat, gen: Int, _ done: @escaping (CGFloat) -> Void) {
-        if hi - lo <= 2 { return done(lo) }
-        let mid = ((lo + hi) / 2).rounded()
-        tryLength(mid, toggleX: toggleX, gen: gen) { [weak self] fits in
-            self?.searchFit(lo: fits ? mid : lo, hi: fits ? hi : mid, toggleX: toggleX, gen: gen, done)
-        }
-    }
-
-    /// Right edge of the frontmost app's menus (File, Edit, View…) on `screen`, via Accessibility.
-    /// Returns nil when the permission isn't granted or the menus can't be read.
-    private func appMenuEnd(on screen: NSScreen) -> CGFloat? {
-        guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        var menuBar: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXMenuBarAttribute as CFString, &menuBar) == .success,
-              let menuBar, CFGetTypeID(menuBar) == AXUIElementGetTypeID() else { return nil }
-        var children: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(menuBar as! AXUIElement, kAXChildrenAttribute as CFString, &children) == .success,
-              let items = children as? [AXUIElement] else { return nil }
-        var end: CGFloat?
-        for item in items {
-            var pos: CFTypeRef?, size: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &pos) == .success,
-                  AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &size) == .success,
-                  let pos, let size else { continue }
-            var p = CGPoint.zero, s = CGSize.zero
-            AXValueGetValue(pos as! AXValue, .cgPoint, &p)
-            AXValueGetValue(size as! AXValue, .cgSize, &s)
-            // AX uses top-left origin, but x is the same as Cocoa's; keep items on this screen.
-            guard p.x >= screen.frame.minX, p.x < screen.frame.maxX else { continue }
-            end = max(end ?? 0, p.x + s.width)
-        }
-        return end
-    }
-
-    // MARK: Permissions status (for the Settings window)
-
-    @Published private(set) var accessibilityGranted = AXIsProcessTrusted()
-
-    func refreshStatus() {
-        accessibilityGranted = AXIsProcessTrusted()
-        checkLayout()
-    }
-
-    func requestAccessibility() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(opts)
-    }
-
-    /// After an update macOS sees a "new" app (it isn't signed with a paid developer ID), so the old
-    /// entry no longer applies. Remove MenuFold's own entry, then ask again.
-    func resetAndRequestAccessibility() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        p.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "com.ploizides.menufold"]
-        try? p.run()
-        p.waitUntilExit()
-        log.notice("tccutil reset exit=\(p.terminationStatus, privacy: .public)")
-        requestAccessibility()
-    }
-
-    /// A running app may keep seeing the old Accessibility answer until it restarts.
-    func relaunch() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
-        try? p.run()
-        NSApp.terminate(nil)
-    }
+    func refreshStatus() { checkLayout() }
 
     /// While folded, notice when the active menu bar moves to another display.
     private func startWatching() {
@@ -331,22 +210,7 @@ final class Controller: NSObject, ObservableObject, NSApplicationDelegate, NSWin
             .delay(for: .seconds(0.3), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.recomputeFold("space changed") }.store(in: &bag)
 
-        // Switched app: on displays without a notch the free space ends where that app's menus end.
-        // (On notched displays this is just a quick check that the current length still fits.)
-        ws.publisher(for: NSWorkspace.didActivateApplicationNotification)
-            .delay(for: .seconds(0.2), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.recomputeFold("app switched") }.store(in: &bag)
-
         startWatching()
-
-        // macOS posts this when any app's Accessibility permission changes.
-        log.notice("launch: accessibility granted=\(AXIsProcessTrusted(), privacy: .public)")
-        DistributedNotificationCenter.default().publisher(for: Notification.Name("com.apple.accessibility.api"))
-            .delay(for: .seconds(0.5), scheduler: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.refreshStatus()
-                self?.log.notice("accessibility changed: granted=\(AXIsProcessTrusted(), privacy: .public)")
-            }.store(in: &bag)
 
         // Fold shortly after launch, once the menu bar has settled.
         if prefs.foldAtLaunch {
@@ -409,7 +273,7 @@ final class Controller: NSObject, ObservableObject, NSApplicationDelegate, NSWin
             return
         }
         folded = f
-        foldGeneration += 1   // cancel any in-flight measurement
+        if !f { foldPaused = false }
         refresh()
         if f { recomputeFold("fold") }
 
@@ -437,8 +301,12 @@ final class Controller: NSObject, ObservableObject, NSApplicationDelegate, NSWin
                 .withSymbolConfiguration(cfg)
         }
 
-        toggle.button?.image = NSImage(systemSymbolName: prefs.toggleIcon.symbol(folded: folded),
+        let hiding = folded && !foldPaused
+        toggle.button?.image = NSImage(systemSymbolName: prefs.toggleIcon.symbol(folded: hiding),
                                        accessibilityDescription: folded ? "Unfold menu bar" : "Fold menu bar")
+        toggle.button?.toolTip = foldPaused
+            ? "Folding is paused on this display (it only works on a screen with a notch)"
+            : "Click to fold/unfold · Right-click for options"
     }
 
     // MARK: Clicks & menu
@@ -529,13 +397,18 @@ struct SettingsView: View {
         Form {
             Section("Status") {
                 HStack {
-                    Label(controller.folded ? "Folded" : "Unfolded",
+                    Label(controller.foldPaused ? "Folded (paused on this display)" : controller.folded ? "Folded" : "Unfolded",
                           systemImage: controller.folded ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
                     Spacer()
                     Button(controller.folded ? "Unfold now" : "Fold now") { controller.toggleFold() }
                         .disabled(!controller.folded && controller.layoutOK != true)
                 }
                 layoutRow
+                if controller.foldPaused {
+                    Label("This display has no notch, so macOS won't let MenuFold hide icons here. Folding resumes on your MacBook's own screen.",
+                          systemImage: "pause.circle")
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("Behavior") {
                 Toggle("Fold automatically when MenuFold starts", isOn: $prefs.foldAtLaunch)
@@ -610,38 +483,11 @@ struct SettingsView: View {
     private var permissions: some View {
         Form {
             Section {
+                permRow("Accessibility", ok: true, detail: "Not needed. MenuFold only uses public menu bar APIs.")
                 permRow("Screen Recording", ok: true, detail: "Not needed. MenuFold never captures the screen.")
                 permRow("Keyboard shortcut", ok: true, detail: "Not needed. Global shortcuts use the system hot-key API.")
             } header: {
-                Text("Not needed")
-            }
-
-            Section("Optional: external monitors") {
-                HStack {
-                    Image(systemName: controller.accessibilityGranted ? "checkmark.circle.fill" : "circle.dashed")
-                        .foregroundStyle(controller.accessibilityGranted ? .green : .secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Device Control and Data Access")
-                        Text(controller.accessibilityGranted
-                             ? "Granted. On monitors without a notch, folding is instant."
-                             : "Called Accessibility on older macOS. Only helps on monitors without a notch: it lets MenuFold read where the app's menus end, so folding there is instant instead of flickering for about a second. Your laptop screen never needs it.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if !controller.accessibilityGranted {
-                        Button("Grant…") { controller.requestAccessibility() }
-                    }
-                }
-                if !controller.accessibilityGranted {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Already switched on in System Settings → Privacy & Security → Device Control and Data Access, but still shows off here? After every update macOS treats MenuFold as a new app, so the old switch no longer applies. Click **Reset & Grant again**. If that doesn't help, **Relaunch**.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        HStack {
-                            Button("Reset & Grant again") { controller.resetAndRequestAccessibility() }
-                            Button("Relaunch") { controller.relaunch() }
-                        }
-                    }
-                }
+                Text("macOS permissions")
             }
 
             Section("Launch at login") {

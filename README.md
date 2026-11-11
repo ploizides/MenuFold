@@ -17,7 +17,7 @@ Menu bar managers like Ice stopped hiding icons for us on macOS 27.
 
 The classic trick is a hidden divider that gets stretched to 10,000 px so every icon to its left is pushed off the screen. On macOS 27 the menu bar is drawn by a new system process (`MenuBarAgent`), which **hides the stretched divider itself** rather than moving anything. The divider vanishes and every icon stays where it was.
 
-MenuFold stretches the divider exactly as far as the free space goes. On a MacBook that means up to the notch; on an external monitor it means up to where the current app's menus end. The icons to its left then no longer fit, and macOS hides them the same way it hides icons that don't fit next to the notch. It needs **no Screen Recording permission**, and the Device Control and Data Access permission (Accessibility on older macOS) is optional (see below).
+MenuFold stretches the divider only as far as the notch. The icons to its left would then have to sit under the notch, and macOS hides them the same way it hides any icon that doesn't fit beside the notch. It uses only public APIs, so it needs **no Accessibility or Screen Recording permission**.
 
 ## Install
 
@@ -84,8 +84,7 @@ Keep the chevron to the right of `│`. If it ends up on the wrong side, MenuFol
 
 - Quit Ice, Bartender or Hidden Bar first so they don't fight over the menu bar.
 - If MenuFold's icons disappear, check **System Settings → Menu Bar** and make sure MenuFold is allowed.
-- **External monitors:** MenuFold folds on whichever screen's menu bar you're using and re-measures when you move between screens or switch apps. Without the optional **Accessibility** permission, it finds the edge by trial and error, so the first fold for each app on a monitor makes icons flash for about 2 seconds (it remembers the result after that). Grant the optional **Device Control and Data Access** permission (called Accessibility on older macOS) in MenuFold's **Settings → Permissions** to make it instant. The laptop screen never needs it.
-- After updating MenuFold, that permission switch may still look on in System Settings but no longer apply, because macOS treats each unsigned build as a new app. Click **Reset & Grant again** in MenuFold's Settings → Permissions.
+- **External monitors:** folding only works on a screen with a notch (a MacBook's own display). On a monitor without one, macOS decides which icons to drop when space runs out, and it drops MenuFold's divider instead of other apps' icons. So MenuFold pauses there and all icons stay visible; it folds again when you're back on the MacBook screen.
 - Requires macOS 14 or later. Built and tested on macOS 27.2 (Apple Silicon). The Intel build is included but untested.
 
 ## Uninstall
